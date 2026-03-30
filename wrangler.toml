@@ -1,4 +1,4 @@
-name = "grok-video-generator"
+name = "grok-video-cf-tool"
 main = "worker.js"
 compatibility_date = "2024-01-01"
 
