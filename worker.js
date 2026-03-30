@@ -1,91 +1,109 @@
-// Cloudflare Worker — grok-video proxy
-// Deploy: wrangler deploy
+/**
+ * Grok Video Generator — Cloudflare Worker
+ * Proxies requests to xAI API with automatic format normalization
+ * Set secret: XAI_API_KEY via `wrangler secret put XAI_API_KEY`
+ */
 
-const XAI_BASE = "https://api.x.ai";
-const ALLOWED_ORIGINS = ["*"];
+const XAI_API_BASE = 'https://api.x.ai/v1';
 
-function corsHeaders(origin) {
-  return {
-    "Access-Control-Allow-Origin": origin || "*",
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
-  };
-}
-
-async function handleOptions(request) {
-  return new Response(null, {
-    status: 204,
-    headers: corsHeaders(request.headers.get("Origin")),
-  });
-}
-
-async function proxyRequest(request, env) {
-  const url = new URL(request.url);
-  const path = url.pathname;
-
-  // API key from environment variable or request header
-  const authHeader = request.headers.get("Authorization");
-  const apiKey = authHeader?.replace("Bearer ", "") || env.XAI_API_KEY;
-
-  if (!apiKey) {
-    return new Response(JSON.stringify({ error: "Missing API key" }), {
-      status: 401,
-      headers: { "Content-Type": "application/json", ...corsHeaders("*") },
-    });
-  }
-
-  // Route mapping: our path → xAI path
-  let xaiPath = path;
-  // Compat: /v1/video/generations → /v1/videos/generations
-  if (path === "/v1/video/generations") xaiPath = "/v1/videos/generations";
-  // GET status: /v1/video/{id} → /v1/videos/{id}
-  if (path.startsWith("/v1/video/") && path !== "/v1/video/generations") {
-    xaiPath = "/v1/videos/" + path.split("/v1/video/")[1];
-  }
-
-  const targetUrl = `${XAI_BASE}${xaiPath}${url.search}`;
-
-  let body = null;
-  if (request.method === "POST") {
-    const rawBody = await request.json().catch(() => ({}));
-    // Normalize model name
-    if (rawBody.model === "grok-video-normal") rawBody.model = "grok-imagine-video";
-    // Normalize params
-    if (rawBody.aspectRatio && !rawBody.aspect_ratio) {
-      rawBody.aspect_ratio = rawBody.aspectRatio;
-      delete rawBody.aspectRatio;
-    }
-    if (rawBody.quality && !rawBody.resolution) {
-      rawBody.resolution = rawBody.quality;
-      delete rawBody.quality;
-    }
-    body = JSON.stringify(rawBody);
-  }
-
-  const upstreamRes = await fetch(targetUrl, {
-    method: request.method,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body,
-  });
-
-  const resBody = await upstreamRes.text();
-  const origin = request.headers.get("Origin") || "*";
-
-  return new Response(resBody, {
-    status: upstreamRes.status,
-    headers: {
-      "Content-Type": upstreamRes.headers.get("Content-Type") || "application/json",
-      ...corsHeaders(origin),
-    },
-  });
-}
+const CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+};
 
 export default {
   async fetch(request, env) {
-    if (request.method === "OPTIONS") return handleOptions(request);
-    return proxyRequest(request, env);
-  },
+    if (request.method === 'OPTIONS') {
+      return new Response(null, { headers: CORS_HEADERS });
+    }
+
+    const url = new URL(request.url);
+    const path = url.pathname;
+
+    const apiKey = env.XAI_API_KEY;
+    if (!apiKey) {
+      return jsonResponse({ error: 'XAI_API_KEY not configured' }, 500);
+    }
+
+    try {
+      // POST /generate — Text to Video
+      if (path === '/generate' && request.method === 'POST') {
+        const body = await request.json();
+        const payload = normalizeGeneratePayload(body);
+        const res = await callXAI('/videos/generations', 'POST', payload, apiKey);
+        return jsonResponse(res.data, res.status);
+      }
+
+      // POST /generate-from-image — Image to Video
+      if (path === '/generate-from-image' && request.method === 'POST') {
+        const body = await request.json();
+        const payload = normalizeImagePayload(body);
+        const res = await callXAI('/videos/generations', 'POST', payload, apiKey);
+        return jsonResponse(res.data, res.status);
+      }
+
+      // GET /status/:requestId — Poll status
+      const statusMatch = path.match(/^\/status\/(.+)$/);
+      if (statusMatch && request.method === 'GET') {
+        const requestId = statusMatch[1];
+        const res = await callXAI(`/videos/generations/${requestId}`, 'GET', null, apiKey);
+        return jsonResponse(res.data, res.status);
+      }
+
+      // GET /health
+      if (path === '/health') {
+        return jsonResponse({ status: 'ok', timestamp: Date.now() });
+      }
+
+      return jsonResponse({ error: 'Not found' }, 404);
+
+    } catch (err) {
+      return jsonResponse({ error: err.message }, 500);
+    }
+  }
 };
+
+/** Normalize text-to-video payload to official xAI format */
+function normalizeGeneratePayload(body) {
+  return {
+    model: body.model || 'grok-imagine-video',
+    prompt: body.prompt,
+    n: body.n || 1,
+    ...(body.duration && { duration: body.duration }),
+    ...(body.resolution && { resolution: body.resolution }),
+    ...(body.aspect_ratio || body.aspectRatio ? { aspect_ratio: body.aspect_ratio || body.aspectRatio } : {}),
+  };
+}
+
+/** Normalize image-to-video payload */
+function normalizeImagePayload(body) {
+  const payload = normalizeGeneratePayload(body);
+  if (body.image) {
+    payload.image = body.image; // base64 data URL or URL
+  }
+  return payload;
+}
+
+async function callXAI(endpoint, method, body, apiKey) {
+  const url = `${XAI_API_BASE}${endpoint}`;
+  const init = {
+    method,
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+  };
+  if (body) init.body = JSON.stringify(body);
+
+  const res = await fetch(url, init);
+  const data = await res.json().catch(() => ({ error: 'Invalid JSON response' }));
+  return { status: res.status, data };
+}
+
+function jsonResponse(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
+  });
+}

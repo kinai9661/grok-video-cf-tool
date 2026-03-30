@@ -1,61 +1,90 @@
-# Grok Video Generator — CF Worker 部署指南
+# Grok Video Generator — 部署指南
 
-## 檔案說明
-- `grok-video-generator.html` — 前端 UI（可直接托管在 CF Pages）
-- `worker.js` — Cloudflare Worker 後端（API 代理）
-- `wrangler.toml` — Worker 設定檔
+## 架構
+
+```
+瀏覽器 (CF Pages)
+    └──> Cloudflare Worker (API 代理)
+              └──> xAI API (api.x.ai)
+```
+
+## 環境需求
+
+- Node.js 18+
+- Wrangler CLI (`npm install -g wrangler`)
+- xAI API Key ([console.x.ai](https://console.x.ai))
 
 ---
 
-## 部署步驟
+## Step 1 — 部署 Worker
 
-### 1. 安裝 Wrangler CLI
 ```bash
-npm install -g wrangler
+# 登入 Cloudflare
 wrangler login
-```
 
-### 2. 設定 API Key（Secret）
-```bash
+# 設定 API Key（不會明文儲存）
 wrangler secret put XAI_API_KEY
-# 貼上你的 xai-xxxxxxxx key
-```
+# 貼上你的 xai-xxxxx key 並按 Enter
 
-### 3. 部署 Worker
-```bash
-cd grok-video-tool
+# 部署 Worker
 wrangler deploy
-```
-部署完成後會輸出 Worker URL，例如：
-`https://grok-video-worker.your-name.workers.dev`
 
-### 4. 部署前端（CF Pages）
-```bash
-# 直接在 CF Dashboard → Pages → Upload assets
-# 上傳 grok-video-generator.html 即可
+# 輸出範例：
+# https://grok-video-generator.<your-subdomain>.workers.dev
 ```
-或使用 wrangler pages deploy：
+
+---
+
+## Step 2 — 部署前端 (CF Pages)
+
 ```bash
 wrangler pages deploy . --project-name grok-video-ui
 ```
 
----
-
-## API 對照表（新舊版本）
-
-| 舊版 | 新版（官方） |
-|---|---|
-| `grok-video-normal` | `grok-imagine-video` |
-| `/v1/video/generations` | `/v1/videos/generations` |
-| `aspectRatio` | `aspect_ratio` |
-| `quality` | `resolution` |
-| 無 request_id 輪詢 | POST → 取 id → GET /v1/videos/{id} |
-
-Worker 會自動做新舊版本兼容轉換。
+或直接在 Cloudflare Dashboard → Pages → 連接此 GitHub 倉庫
 
 ---
 
-## 環境變數
-| 變數 | 說明 |
-|---|---|
-| `XAI_API_KEY` | xAI API Key（用 `wrangler secret put` 設定） |
+## Step 3 — 使用
+
+1. 開啟前端頁面 `grok-video-generator.html`
+2. 填入 Worker URL（Step 1 輸出的 URL）
+3. 輸入 Prompt，設定參數，點擊「開始生成」
+4. 等待 AI 生成（通常 1-3 分鐘）
+5. 生成完成後可預覽、下載、複製連結
+
+---
+
+## Worker API 端點
+
+| 端點 | 方法 | 說明 |
+|------|------|------|
+| `/generate` | POST | 文字生成影片 |
+| `/generate-from-image` | POST | 圖片生成影片 |
+| `/status/:requestId` | GET | 查詢生成狀態 |
+| `/health` | GET | 健康檢查 |
+
+### 請求範例
+
+```bash
+# 文字生成
+curl -X POST https://your-worker.workers.dev/generate \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt": "一隻貓咪在草地上奔跑", "duration": 10, "aspect_ratio": "16:9"}'
+
+# 查詢狀態
+curl https://your-worker.workers.dev/status/<request_id>
+```
+
+---
+
+## 常見問題
+
+**Q: 生成失敗 `XAI_API_KEY not configured`**
+A: 執行 `wrangler secret put XAI_API_KEY` 重新設定
+
+**Q: CORS 錯誤**
+A: Worker 已內建 CORS headers，確認 Worker URL 正確即可
+
+**Q: 影片一直顯示「處理中」**
+A: xAI 影片生成通常需要 1-5 分鐘，請耐心等待

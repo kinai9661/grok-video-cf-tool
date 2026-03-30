@@ -1,10 +1,9 @@
-name = "grok-video-worker"
+name = "grok-video-generator"
 main = "worker.js"
-compatibility_date = "2025-01-01"
+compatibility_date = "2024-01-01"
 
-[vars]
-# Set XAI_API_KEY as a secret via: wrangler secret put XAI_API_KEY
+# Deploy: wrangler deploy
+# Set secret: wrangler secret put XAI_API_KEY
 
-[[routes]]
-pattern = "your-domain.workers.dev/*"
-zone_name = "workers.dev"
+[observability]
+enabled = true
